@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ASCII Banqiao · 板橋耶誕城</title>
+<meta name="description" content="用彩色 ASCII 字元一筆一筆畫出的板橋冬夜：林本源園邸、板橋車站、新北市政府、新月橋，和新北耶誕城的燈光秀。">
+<meta name="theme-color" content="#03040b">
+<meta property="og:title" content="ASCII Banqiao · 板橋耶誕城">
+<meta property="og:description" content="用彩色 ASCII 字元一筆一筆畫出的板橋冬夜，最後市府大樓倒數、耶誕城燈光秀開始。">
+<meta property="og:image" content="https://baize404.github.io/ascii-banqiao/preview.png">
+<style>
+  html, body { margin: 0; height: 100%; background: #03040b; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+  #main, #glow { position: fixed; left: 0; top: 0; }
+  #glow { pointer-events: none; mix-blend-mode: screen; opacity: .8; filter: blur(var(--blur, 8px)); }
+  .ui { position: fixed; z-index: 2; bottom: max(14px, env(safe-area-inset-bottom)); font: inherit; font-size: 13px;
+        color: #b9c1d9; background: rgba(10, 12, 22, .72); border: 1px solid rgba(150, 160, 200, .3);
+        border-radius: 999px; padding: 9px 15px; text-decoration: none; cursor: pointer;
+        -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+  .ui:hover { color: #fff; border-color: rgba(200, 210, 240, .55); }
+  #sound { right: 14px; }
+  #src { left: 14px; }
+  #paused { position: fixed; z-index: 2; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #dfe4f2; font-size: 14px; background: rgba(10, 12, 22, .8); padding: 10px 16px;
+            border-radius: 10px; display: none; pointer-events: none; }
+  body.is-paused #paused { display: block; }
+</style>
+</head>
+<body>
+<canvas id="main"></canvas>
+<canvas id="glow"></canvas>
+<button id="sound" class="ui" type="button">♪ 開聲音</button>
+<a id="src" class="ui" href="https://github.com/baize404/ascii-banqiao">原始碼</a>
+<div id="paused">暫停中，點一下繼續</div>
+<script>
+"use strict";
+// A browser port of banqiao.py: same stages, same layers, same timings
+// (so the soundtrack in music.m4a lines up), drawn with fillText on a canvas.
+
+const ASPECT = 2, LOOP = 39, FADE = 37, SHOW = 29, METEOR = 22.2;
+const STAGES = [["sky", 0, 3], ["mountains", 1.5, 5], ["river", 4, 7], ["city", 6, 11],
+  ["lin_garden", 10, 13.5], ["city_hall", 13, 18], ["lights", 18, 21.5], ["moon_bridge", 21.5, 24],
+  ["countdown", 24, 29], ["light_show", 29, 36.5], ["merry_xmas", 30.5, 36.5]];
+const ST = {};
+for (const [n, a, b] of STAGES) ST[n] = [a, b];
+
+const C = {
+  STAR: [.80, .85, 1], MOON: [1, .93, .70], RIDGE: [.36, .44, .68], HILLSIDE: [.13, .16, .28],
+  WALL: [.40, .45, .64], WIN_OFF: [.20, .23, .36], LEAVES: [.10, .32, .18], TRUNK: [.35, .22, .12],
+  LIME: [.62, .60, .56], TILE: [.80, .34, .18], BRICK: [.72, .24, .16], RIDGE_TOP: [.98, .58, .22],
+  AMBER_OFF: [.36, .22, .10], AMBER_ON: [1, .72, .32], HALL: [.46, .50, .64], HALL_GLASS: [.20, .24, .36],
+  HALL_ON: [.95, .92, .80], STEEL: [.62, .66, .74], DECK: [.95, .88, .70], SNOW: [.86, .92, 1],
+  HUD: [.45, .50, .64], WHITE: [1, 1, 1], BLACK: [0, 0, 0], STATION_ON: [.75, .85, 1],
+};
+const WIN_ON = [[1, .80, .42], [1, .90, .62], [.92, .95, 1], [.55, .80, 1]];
+const WIN_P = [.45, .25, .18, .12];
+const WATER = [.10, .22, .45];
+const BALLOON = [[.98, .55, .70], [1, .86, .62], [.62, .82, 1], [1, .70, .80], [.80, .95, .70]];
+const DIGITS = {
+  1: [".#.", "##.", ".#.", ".#.", "###"], 2: ["###", "..#", "###", "#..", "###"],
+  3: ["###", "..#", ".##", "..#", "###"], 4: ["#.#", "#.#", "###", "..#", "..#"],
+  5: ["###", "#..", "###", "..#", "###"],
+};
+
+const clamp01 = v => Math.min(Math.max(v, 0), 1);
+const smooth = v => { v = clamp01(v); return v * v * (3 - 2 * v); };
+const prog = (n, t) => clamp01((t - ST[n][0]) / (ST[n][1] - ST[n][0]));
+const scale = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+const hash01 = (a, b) => { const v = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453; return v - Math.floor(v); };
+const dirChar = deg => { deg = ((deg % 180) + 180) % 180; return (deg < 22.5 || deg >= 157.5) ? "-" : deg < 67.5 ? "\\" : deg < 112.5 ? "|" : "/"; };
+function hsv(h, s, v) {
+  h = ((h % 1) + 1) % 1;
+  const i = Math.floor(h * 6), f = h * 6 - i, p = v * (1 - s), q = v * (1 - s * f), u = v * (1 - s * (1 - f));
+  return [[v, u, p], [q, v, p], [p, v, u], [p, q, v], [u, p, v], [v, p, q]][i % 6];
+}
+function makeRng(seed) {   // mulberry32
+  let a = seed >>> 0;
+  const next = () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return {
+    random: next,
+    uniform: (lo, hi) => lo + (hi - lo) * next(),
+    int: (lo, hi) => lo + Math.floor(next() * (hi - lo)),
+    pick: arr => arr[Math.floor(next() * arr.length)],
+  };
+}
+function edgeChar(top, left, right) {
+  if (left > top && right > top) return "^";
+  if (left > top) return "/";
+  if (right > top) return "\\";
+  return "_";
+}
+
+// ------------------------------------------------------------------ layers
+class Layer {   // a character, a colour and a reveal order per cell; Infinity = empty
+  constructor(h, w) {
+    this.h = h; this.w = w;
+    this.ch = new Uint16Array(h * w).fill(32);
+    this.rgb = new Float32Array(h * w * 3);
+    this.order = new Float32Array(h * w).fill(Infinity);
+  }
+  put(y, x, c, rgb, o) {
+    if (y < 0 || y >= this.h || x < 0 || x >= this.w) return;
+    const i = y * this.w + x;
+    this.ch[i] = c.charCodeAt(0); this.order[i] = o;
+    this.rgb[3 * i] = rgb[0]; this.rgb[3 * i + 1] = rgb[1]; this.rgb[3 * i + 2] = rgb[2];
+  }
+}
+class Frame {
+  constructor(h, w) {
+    this.h = h; this.w = w;
+    this.ch = new Uint16Array(h * w);
+    this.rgb = new Float32Array(h * w * 3);
+  }
+  clear() { this.ch.fill(32); this.rgb.fill(0); }
+  blit(L, p, tip = 0.05) {   // show cells whose order <= p; the newest ones flash like a pen tip
+    if (p <= 0) return;
+    const n = this.h * this.w;
+    for (let i = 0; i < n; i++) {
+      const o = L.order[i];
+      if (o > p) continue;
+      this.ch[i] = L.ch[i];
+      let r = L.rgb[3 * i], g = L.rgb[3 * i + 1], b = L.rgb[3 * i + 2];
+      if (p < 1 && tip > 0 && o > p - tip) { r = r * .3 + .85; g = g * .3 + .85; b = b * .3 + .85; }
+      this.rgb[3 * i] = r; this.rgb[3 * i + 1] = g; this.rgb[3 * i + 2] = b;
+    }
+  }
+  put(y, x, c, rgb) {
+    y = Math.round(y); x = Math.round(x);
+    if (y < 0 || y >= this.h || x < 0 || x >= this.w) return;
+    const i = y * this.w + x;
+    this.ch[i] = c.charCodeAt(0);
+    this.rgb[3 * i] = rgb[0]; this.rgb[3 * i + 1] = rgb[1]; this.rgb[3 * i + 2] = rgb[2];
+  }
+  text(y, x, s, rgb) { for (let i = 0; i < s.length; i++) if (s[i] !== " ") this.put(y, x + i, s[i], rgb); }
+}
+
+// ------------------------------------------------------------------ scene
+class Scene {
+  constructor(w, h, seed = 101) {
+    this.w = w; this.h = h;
+    this.hz = Math.round(h * 0.70);
+    this.S = h * ASPECT;
+    this.Sx = Math.min(this.S, 1.1 * w);
+    this.xlin = Math.round(w * 0.17); this.xtree = Math.round(w * 0.335); this.xballoon = Math.round(w * 0.46);
+    this.xhall = Math.round(w * 0.70); this.xstation = Math.round(w * 0.92);
+    this.year = new Date().getFullYear();
+    const rng = makeRng(seed);
+    this.buildStars(rng);
+    this.mountains = this.buildMountains(rng);
+    [this.city, this.cityWin] = this.buildCity(rng);
+    [this.lin, this.linWin] = this.buildLinGarden(rng);
+    [this.hall, this.hallWin] = this.buildCityHall(rng);
+    this.bR = Math.max(5, 0.075 * this.Sx); this.bRy = this.bR * 1.25 / ASPECT; this.bBase = this.hz - 2;
+    this.buildBridge();
+    this.snow = [];
+    const n = Math.floor(w * h * 0.025);
+    for (let i = 0; i < n; i++) this.snow.push([1, 2, 3, 4, 5].map(k => hash01(i, k)));
+    this.F = new Frame(h, w);
+  }
+
+  buildStars(rng) {
+    const n = Math.floor(this.w * this.hz * 0.025);
+    this.stars = [];
+    for (let i = 0; i < n; i++)
+      this.stars.push([rng.int(0, this.hz - 2), rng.int(0, this.w), rng.uniform(0, 2 * Math.PI), rng.uniform(1, 3), rng.random()]);
+  }
+
+  buildMountains(rng) {   // Guanyin Mountain and the Linkou plateau, far across the river
+    const { w: W, h: H, hz } = this, L = new Layer(H, W);
+    const bump = (x, c, s, a) => a * Math.exp(-(((x - c) / s) ** 2));
+    const ridge = [];
+    for (let xi = 0; xi < W; xi++) {
+      const x = xi / (W - 1);
+      const prof = bump(x, .08, .08, .20) + bump(x, .20, .07, .27) + bump(x, .34, .09, .18)
+        + bump(x, .60, .25, .07) + bump(x, .95, .10, .10) + .03;
+      ridge.push(Math.min(Math.max(Math.round(hz - 1 - prof * this.Sx / ASPECT), 1), hz - 1));
+    }
+    for (let xi = 0; xi < W; xi++) {
+      const top = ridge[xi], left = xi > 0 ? ridge[xi - 1] : top, right = xi < W - 1 ? ridge[xi + 1] : top;
+      const c = edgeChar(top, left, right), low = Math.max(top, Math.max(left, right) - 1);
+      for (let y = top; y < hz; y++) {
+        const o = 0.92 * xi / W + 0.08 * (y - top) / Math.max(1, hz - top);
+        if (y <= low) L.put(y, xi, (y === top || c !== "^") ? c : (left >= right ? "/" : "\\"), C.RIDGE, o);
+        else if (rng.random() < 0.16) L.put(y, xi, rng.pick([".", ":", "'"]), scale(C.HILLSIDE, 1 - 0.4 * (y - top) / Math.max(1, hz - top)), o);
+        else L.put(y, xi, " ", C.BLACK, o);
+      }
+    }
+    return L;
+  }
+
+  building(L, win, rng, x0, bw, bh, st) {
+    const hz = this.hz, top = hz - bh, x1 = x0 + bw - 1;
+    for (let y = top; y < hz; y++) {
+      const o = st + 0.36 * (hz - 1 - y) / Math.max(bh - 1, 1);
+      for (let x = x0; x <= x1; x++) {
+        if (y === top) { if (x > x0 && x < x1) L.put(y, x, "_", C.WALL, o); }
+        else if (x === x0 || x === x1) L.put(y, x, "|", C.WALL, o);
+        else if ((x - x0) % 2 === 1 && (y - top) % 2 === 0) {
+          L.put(y, x, ":", C.WIN_OFF, o);
+          if (rng.random() < 0.8) {
+            let r = rng.random(), k = 0;
+            while (k < 3 && r > WIN_P[k]) { r -= WIN_P[k]; k++; }
+            win.put(y, x, rng.random() < 0.7 ? "#" : "=", WIN_ON[k], rng.random());
+          }
+        } else L.put(y, x, " ", C.BLACK, o);
+      }
+    }
+    if (bh >= 0.15 * this.h && rng.random() < 0.7) {
+      const xc = x0 + Math.floor(bw / 2);
+      L.put(top - 1, xc, "|", C.WALL, st + 0.37);
+      this.blinkers.push([top - 2, xc, L, top - 1, rng.uniform(0, 1)]);
+    }
+  }
+
+  buildCity(rng) {   // the towers of the Xinban district, and Banqiao Station
+    const { w: W, h: H, hz } = this, L = new Layer(H, W), win = new Layer(H, W);
+    this.blinkers = [];
+    let x = 0;
+    while (x < W) {
+      const bw = rng.int(3, 8);
+      const near = Math.exp(-((((x + bw / 2) / W - this.xhall / W) / 0.18) ** 2));
+      const bh = Math.max(3, Math.round(rng.uniform(0.4, 1) * (0.10 + 0.14 * near) * H));
+      this.building(L, win, rng, x, bw, bh, rng.uniform(0, 0.62));
+      x += bw + rng.int(0, 2);
+    }
+    const bw = Math.max(12, Math.round(0.17 * this.Sx)), bh = Math.max(5, Math.round(0.15 * H));
+    const x0 = this.xstation - Math.floor(bw / 2), x1 = x0 + bw - 1, top = hz - bh;
+    const sign = bw >= 11 ? "BANQIAO" : "", sx = x0 + Math.floor((bw - sign.length) / 2);
+    for (let y = top; y < hz; y++) {
+      const o = 0.55 + 0.4 * (hz - 1 - y) / Math.max(bh - 1, 1);
+      for (let x = x0; x <= x1; x++) {
+        if (y === top) { if (x > x0 && x < x1) L.put(y, x, "_", C.WALL, o); }
+        else if (x === x0 || x === x1) L.put(y, x, "|", C.WALL, o);
+        else if (y === top + 1) {
+          L.put(y, x, "=", C.WALL, o);
+          if (sign && x >= sx && x < sx + sign.length) { L.put(y, x, sign[x - sx], C.WIN_OFF, o); win.put(y, x, sign[x - sx], C.WHITE, 0.2); }
+        } else if ((y - top) % 2 === 0) {
+          L.put(y, x, ":", C.WIN_OFF, o);
+          win.put(y, x, x % 3 ? ":" : "|", C.STATION_ON, rng.uniform(0.1, 0.9));
+        } else L.put(y, x, "=", C.WALL, o);
+      }
+    }
+    return [L, win];
+  }
+
+  buildLinGarden(rng) {   // banyans, a whitewashed wall with a moon gate, a pavilion with a swallowtail ridge
+    const { w: W, h: H, hz } = this, L = new Layer(H, W), win = new Layer(H, W), xc = this.xlin;
+    const a = Math.max(8, Math.round(0.12 * this.Sx));
+    for (const [dx, r] of [[-0.85, 0.30], [0.85, 0.32]]) {
+      const cx = xc + dx * a, rx = Math.max(3, r * a), ry = rx / ASPECT * 1.1, cy = hz - 3 - ry;
+      for (let y = Math.floor(cy - ry) - 1; y < hz - 2; y++)
+        for (let x = Math.floor(cx - rx) - 1; x < Math.floor(cx + rx) + 2; x++) {
+          const u = (x - cx) / rx, v = (y - cy) / ry;
+          if (u * u + v * v <= 1)
+            L.put(y, x, rng.pick(["@", "%", "&", "8"]), scale(C.LEAVES, 0.7 + 0.3 * rng.random()), 0.25 * (1 - (y - cy + ry) / (2 * ry + 1)) + 0.05 * rng.random());
+          else if (Math.abs(x - cx) < 0.6 && y > cy) L.put(y, x, "|", C.TRUNK, 0.05);
+        }
+    }
+    const hw = Math.max(5, Math.round(0.075 * this.Sx));
+    const spec = [["ground", hw - 1], ["ground", hw - 1], ["ground", hw - 1], ["eave", hw + 2], ["slope", hw],
+      ["upper", hw - 2], ["eave", hw], ["ridge", hw - 1]];
+    let y = hz - 1;
+    spec.forEach(([kind, half], i) => {
+      const xl = xc - half, xr = xc + half;
+      for (let x = xl; x <= xr; x++) {
+        const o = 0.35 + 0.6 * i / spec.length + 0.02 * Math.abs(x - xc) / half;
+        if (kind === "ground" || kind === "upper") {
+          if (x === xl || x === xr || (x - xl) % 2 === 0) L.put(y, x, "|", C.BRICK, o);
+          else if (kind === "ground" && Math.abs(x - xc) <= 1) L.put(y, x, " ", C.BLACK, o);
+          else { L.put(y, x, ":", C.AMBER_OFF, o); win.put(y, x, "#", C.AMBER_ON, rng.uniform(0, 0.7)); }
+        } else if (kind === "eave") L.put(y, x, x === xl ? "`" : x === xr ? "'" : "~", C.TILE, o);
+        else if (kind === "slope") L.put(y, x, x === xl ? "/" : x === xr ? "\\" : "=", C.TILE, o);
+        else L.put(y, x, x === xl ? "\\" : x === xr ? "/" : "_", C.RIDGE_TOP, o);
+      }
+      if (kind === "ridge") { L.put(y - 1, xl - 1, "'", C.RIDGE_TOP, 0.99); L.put(y - 1, xr + 1, "'", C.RIDGE_TOP, 0.99); }
+      y--;
+    });
+    const gx = xc - Math.round(a * 0.6);
+    for (let x = xc - a; x <= xc + a; x++) {
+      const o = 0.28 + 0.12 * (x - xc + a) / (2 * a);
+      for (const yy of [hz - 2, hz - 1]) {
+        if (Math.abs(x - gx) <= 1) L.put(yy, x, " ", C.BLACK, o);
+        else if (Math.abs(x - gx) === 2) L.put(yy, x, yy === hz - 2 ? (x < gx ? "(" : ")") : "|", C.LIME, o);
+        else if (yy === hz - 2) L.put(yy, x, "=", C.TILE, o);
+        else if ((((x - xc) % 6) + 6) % 6 === 3) { L.put(yy, x, ":", C.AMBER_OFF, o); win.put(yy, x, "#", C.AMBER_ON, rng.uniform(0, 0.7)); }
+        else L.put(yy, x, ((x * 7 + yy) % 5 + 5) % 5 === 0 ? "." : " ", C.LIME, o);
+      }
+    }
+    return [L, win];
+  }
+
+  buildCityHall(rng) {   // a podium and two square towers joined at the top
+    const { w: W, h: H, hz } = this, L = new Layer(H, W), win = new Layer(H, W), xc = this.xhall;
+    const ytop = Math.max(4, Math.round(0.15 * H)), yb = hz - 1, h = yb - ytop + 1;
+    const th = Math.max(6, Math.round(0.12 * this.Sx)), sw = Math.max(1, Math.round(th * 0.12));
+    const pod = Math.max(3, Math.round(h * 8 / 33)), ph = th + Math.max(2, Math.round(0.2 * th));
+    const crown = Math.max(2, Math.round(h * 0.07)), ytb = yb - pod;
+    this.face = [];   // [cell index, u, v]
+    for (let i = 0, y = yb; y >= ytop; y--, i++) {
+      const o = i / (h - 1);
+      if (y > ytb) {
+        for (let x = xc - ph; x <= xc + ph; x++) {
+          if (x === xc - ph || x === xc + ph) L.put(y, x, "|", C.HALL, o);
+          else if (y === ytb + 1) L.put(y, x, "=", C.HALL, o);
+          else if ((x - xc) % 2 === 0) { L.put(y, x, ":", C.HALL_GLASS, o); win.put(y, x, ":", C.HALL_ON, rng.uniform(0, 0.8)); }
+          else L.put(y, x, " ", C.BLACK, o);
+        }
+        continue;
+      }
+      const inCrown = y < ytop + crown;
+      for (let x = xc - th; x <= xc + th; x++) {
+        const d = Math.abs(x - xc);
+        let c, rgb;
+        if (x === xc - th || x === xc + th) { c = "|"; rgb = C.HALL; }
+        else if (inCrown) { c = y === ytop ? "_" : "="; rgb = C.HALL; if (y > ytop) win.put(y, x, "=", C.HALL_ON, rng.uniform(0, 0.2)); }
+        else if (d <= sw) { c = "."; rgb = scale(C.HALL_GLASS, 0.6); }
+        else if (d === sw + 1) { c = "|"; rgb = C.HALL; }
+        else {
+          c = ":"; rgb = C.HALL_GLASS;
+          if (rng.random() < 0.85) win.put(y, x, rng.random() < 0.6 ? "#" : ":", C.HALL_ON, rng.uniform(0.1, 1));
+        }
+        L.put(y, x, c, rgb, o + 0.01 * d / th);
+        if (x !== xc - th && x !== xc + th && y >= 0 && y < H && x >= 0 && x < W)
+          this.face.push([y * W + x, (x - (xc - th)) / (2 * th), (y - ytop) / Math.max(1, ytb - ytop)]);
+      }
+    }
+    for (const dx of [-Math.floor(th / 2), Math.floor(th / 2)]) {
+      L.put(ytop - 1, xc + dx, "|", C.STEEL, 1);
+      this.blinkers.push([ytop - 2, xc + dx, L, ytop - 1, dx < 0 ? 0.3 : 0.8]);
+    }
+    this.digitY = Math.floor((ytop + crown + ytb) / 2);
+    this.digitPw = Math.max(1, Math.floor((2 * th + 1) / 8));
+    this.digitPh = Math.max(1, Math.round(this.digitPw / 2));
+    return [L, win];
+  }
+
+  buildBridge() {   // the Crescent Bridge: two unequal steel arches tied to one deck
+    const { w: W, h: H, hz } = this;
+    this.deckY = hz + Math.max(3, Math.round(0.4 * (H - hz)));
+    this.arch = [];
+    for (const [a, b, hp] of [[0.03, 0.60, 0.13], [0.60, 0.97, 0.08]]) {
+      const xa = a * W, xb = b * W, c = (xa + xb) / 2, half = (xb - xa) / 2;
+      const peak = Math.min(hp * this.Sx / ASPECT, this.deckY - hz - 1);
+      const yf = x => this.deckY - peak * Math.max(0, 1 - ((x - c) / half) ** 2);
+      for (let x = Math.ceil(xa); x <= Math.floor(xb); x++) {
+        const y0 = yf(x - 0.5), y1 = yf(x + 0.5), slope = y1 - y0;
+        const lo = Math.round(Math.min(y0, y1)), hi = Math.round(Math.max(y0, y1));
+        const ch = Math.abs(slope) > 2.5 ? "|" : Math.abs(slope) < 0.25 ? (Math.abs(x - c) < half * 0.2 ? "_" : "-") : (slope < 0 ? "/" : "\\");
+        for (let y = lo; y <= hi; y++) if (y < this.deckY) this.arch.push([y, x, ch, x / W]);
+        if (x % 4 === 0) for (let y = hi + 1; y < this.deckY; y++) this.arch.push([y, x, ":", -1 - x / W]);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------- per frame
+  render(t) {
+    t = ((t % LOOP) + LOOP) % LOOP;
+    const F = this.F, P = {};
+    F.clear();
+    for (const n in ST) P[n] = prog(n, t);
+    this.drawStars(F, t, P.sky);
+    this.drawMoon(F, t);
+    F.blit(this.mountains, P.mountains);
+    F.blit(this.city, P.city);
+    F.blit(this.cityWin, P.lights, 0);
+    this.drawBalloon(F, t, P);
+    this.drawTree(F, t, P);
+    F.blit(this.lin, P.lin_garden);
+    F.blit(this.linWin, P.lights, 0);
+    F.blit(this.hall, P.city_hall);
+    F.blit(this.hallWin, P.lights, 0);
+    this.lightHall(F, t, P);
+    this.drawBlinkers(F, t, P);
+    this.drawLasers(F, t);
+    this.drawMeteor(F, t);
+    this.drawRiver(F, t, P.river);
+    this.drawArches(F, t, P.moon_bridge);
+    this.drawDeck(F, t, P.moon_bridge);
+    this.drawSnow(F, t);
+    this.drawGreeting(F, t, P.merry_xmas);
+    this.fade = t > FADE ? 1 - smooth((t - FADE) / (LOOP - FADE)) : 1;
+    if (this.fade < 1) for (let i = 0; i < F.rgb.length; i++) F.rgb[i] *= this.fade;
+    this.drawHud(F, t);
+    return F;
+  }
+
+  drawStars(F, t, p) {
+    for (const [y, x, ph, rate, o] of this.stars) {
+      if (o > p) continue;
+      const b = 0.55 + 0.45 * Math.sin(t * rate + ph);
+      F.put(y, x, b > 0.92 ? "*" : b > 0.7 ? "+" : ".", scale(C.STAR, 0.35 + 0.65 * b));
+    }
+  }
+
+  drawMoon(F, t) {
+    const r = Math.max(4, 0.075 * this.Sx), xm = 0.30 * this.w, yEnd = 0.20 * this.h;
+    const ym = this.hz - 1 - (this.hz - 1 - yEnd) * smooth(t / 6);
+    const y0 = Math.floor(ym - r / ASPECT) - 1, y1 = Math.floor(ym + r / ASPECT) + 2;
+    for (let y = Math.max(0, y0); y < Math.min(this.hz, y1); y++)
+      for (let x = Math.floor(xm - r) - 1; x < Math.floor(xm + r) + 2; x++) {
+        const dx = (x - xm) / r, dy = (y - ym) * ASPECT / r, d = dx * dx + dy * dy;
+        const shadow = (dx + 0.62) ** 2 + (dy - 0.10) ** 2;
+        if (d > 1 || shadow < 0.72) continue;
+        const depth = Math.min(1 - d, shadow - 0.72);
+        F.put(y, x, depth > 0.22 ? "@" : depth > 0.12 ? "#" : depth > 0.05 ? "*" : ".", scale(C.MOON, 0.75 + 0.25 * Math.min(1, depth * 5)));
+      }
+  }
+
+  drawBalloon(F, t, P) {   // this year's main light: a giant hot-air balloon on the plaza
+    if (P.city < 0.7) return;
+    const lit = t >= SHOW ? smooth((t - SHOW) / 0.8) : 0, R = this.bR, ry = this.bRy, xc = this.xballoon;
+    const base = this.bBase + 0.5 * Math.sin((t - SHOW) * 1.3) * lit, cy = base - 4 - ry * 0.8;
+    for (let y = Math.floor(cy - ry) - 1; y < Math.floor(cy + ry) + 2; y++) {
+      const dy = (y - cy) / ry;
+      if (Math.abs(dy) > 1) continue;
+      const half = R * Math.sqrt(1 - dy * dy) * (1 - 0.45 * Math.max(0, dy));
+      for (let x = Math.floor(xc - half); x < Math.floor(xc + half) + 1; x++) {
+        const dx = (x - xc) / Math.max(half, 0.5);
+        if (Math.abs(dx) > 1) continue;
+        const gore = Math.floor((dx + 1) / 2 * 6 - 1e-9), edge = Math.abs(dx) > 0.82;
+        let c = edge ? (dx < 0 ? "(" : ")") : (dy < -0.9 ? "_" : (((dx + 1) * 3) % 1 < 0.18 ? "|" : ":"));
+        let rgb;
+        if (lit > 0) {
+          const k = lit * (0.7 + 0.3 * Math.sin(t * 3 + gore + dy * 2)), b = BALLOON[((gore % 5) + 5) % 5];
+          rgb = b.map(v => 0.2 * (1 - lit) + v * k);
+          if (!edge && hash01(x * 31 + y, Math.floor(t * 6)) > 0.93) { c = "*"; rgb = C.WHITE; }
+        } else rgb = [0.24, 0.22, 0.30];
+        F.put(y, x, c, rgb);
+      }
+    }
+    const mouth = cy + ry;
+    for (const k of [1, 2]) {
+      F.put(mouth + k, xc - 2 + k * 0.5, "\\", C.STEEL);
+      F.put(mouth + k, xc + 2 - k * 0.5, "/", C.STEEL);
+    }
+    for (let dx = -1; dx <= 1; dx++) F.put(mouth + 3, xc + dx, "#", lit ? [0.8, 0.55, 0.3] : [0.35, 0.25, 0.18]);
+    F.put(mouth + 3, xc - 2, "[", [0.6, 0.45, 0.3]);
+    F.put(mouth + 3, xc + 2, "]", [0.6, 0.45, 0.3]);
+  }
+
+  drawTree(F, t, P) {
+    if (P.city < 0.8) return;
+    const ht = Math.max(6, Math.round(0.13 * this.h)), xc = this.xtree, base = this.hz - 2;
+    const on = P.lights > 0.5, show = t >= SHOW;
+    F.put(base, xc, "|", C.TRUNK);
+    for (let r = 0; r < ht - 1; r++) {
+      const y = base - 1 - (ht - 2 - r), half = Math.round((r + 1) * 0.55);
+      for (let x = xc - half; x <= xc + half; x++) {
+        let c = x === xc - half ? "/" : x === xc + half ? "\\" : "^", rgb = [0.12, 0.42, 0.20];
+        const hsh = hash01(x * 13 + y, 3);
+        if (on && c === "^" && hsh > 0.6 && ((t * (1.5 + hsh) + hsh * 9) % 1) < (show ? 0.75 : 0.55)) { c = "o"; rgb = hsv(hsh * 5, 0.7, 1); }
+        F.put(y, x, c, rgb);
+      }
+    }
+    F.put(base - ht, xc, "*", on ? [1, 0.85, 0.3] : [0.5, 0.45, 0.25]);
+  }
+
+  lightHall(F, t, P) {   // City Hall's facade as a screen: countdown, then the projection show
+    const cd = P.countdown, face = this.face.filter(f => this.hall.order[f[0]] <= P.city_hall);
+    if (cd > 0 && cd < 1) {
+      for (const [i] of face) { F.ch[i] = 58; F.rgb[3 * i] = 0.06; F.rgb[3 * i + 1] = 0.07; F.rgb[3 * i + 2] = 0.11; }
+      const n = 5 - Math.min(4, Math.floor(cd * 5)), pulse = 1 - 0.55 * ((cd * 5) % 1);
+      const pw = this.digitPw, ph = this.digitPh;
+      const x0 = this.xhall - Math.floor(3 * pw / 2), y0 = this.digitY - Math.floor(5 * ph / 2);
+      DIGITS[n].forEach((line, r) => {
+        for (let c = 0; c < 3; c++) if (line[c] === "#")
+          for (let qy = 0; qy < ph; qy++) for (let qx = 0; qx < pw; qx++)
+            F.put(y0 + r * ph + qy, x0 + c * pw + qx, "#", [pulse, 0.95 * pulse, 0.8 * pulse]);
+      });
+      return;
+    }
+    if (t < SHOW) return;
+    const s = t - SHOW, mode = Math.floor(s / 2) % 4, k = smooth(s / 0.6);
+    const stripes = [[1, 0.25, 0.25], [0.30, 0.90, 0.45], [1, 0.80, 0.30]];
+    for (const [i, u, v] of face) {
+      let col, c = "#";
+      if (mode === 0) col = hsv(u * 0.6 + v * 0.3 - s * 0.4, 0.6, 1);
+      else if (mode === 1) {
+        const dx = u - 0.5, dy = (v - 0.5) * 1.6, r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
+        const on = (Math.cos(6 * a) > 0.82 && r < 0.48) || Math.abs(r - 0.28) < 0.03 || r < 0.06;
+        col = on ? C.SNOW : [0.10, 0.18, 0.42]; c = on ? "*" : ":";
+      } else if (mode === 2) col = stripes[(((Math.floor(u * 6 + v * 9 - s * 2)) % 3) + 3) % 3];
+      else {
+        const tw = hash01(i, Math.floor(t * 8)) > 0.88;
+        col = tw ? C.WHITE : [1, 0.72, 0.30].map(x => x * (0.6 + 0.3 * v)); c = tw ? "*" : ":";
+      }
+      F.ch[i] = c.charCodeAt(0);
+      for (let q = 0; q < 3; q++) F.rgb[3 * i + q] = F.rgb[3 * i + q] * (1 - k) + col[q] * k;
+    }
+  }
+
+  drawBlinkers(F, t, P) {
+    for (const [y, x, layer, below, ph] of this.blinkers) {
+      if (below < 0) continue;
+      const p = layer === this.hall ? P.city_hall : P.city;
+      if (layer.order[below * this.w + x] <= p && ((t * 1.1 + ph) % 1) < 0.45) F.put(y, x, "*", [1, 0.18, 0.15]);
+    }
+  }
+
+  drawLasers(F, t) {   // beams from the plaza sweeping the sky behind everything
+    if (t < SHOW) return;
+    const k = smooth(t - SHOW), steps = Math.floor(this.h * 2.5);
+    [0.40, 0.53, 0.64].forEach((xf, j) => {
+      const ang = (90 + 38 * Math.sin(t * 0.8 + j * 2.1)) * Math.PI / 180;
+      const dx = Math.cos(ang), dy = -Math.sin(ang) / ASPECT;
+      const c = dirChar(Math.atan2(-dy * ASPECT, dx) * 180 / Math.PI + 180), rgb0 = hsv(0.33 + 0.28 * j + 0.05 * Math.sin(t), 0.8, 0.55 * k);
+      let x = xf * this.w, y = this.hz - 2;
+      for (let step = 0; step < steps; step++) {
+        x += dx; y += dy;
+        const yi = Math.round(y), xi = Math.round(x);
+        if (yi < 0 || yi >= this.hz || xi < 0 || xi >= this.w) break;
+        if (F.ch[yi * this.w + xi] === 32) F.put(yi, xi, c, scale(rgb0, 1 - step / steps));
+      }
+    });
+  }
+
+  drawMeteor(F, t) {
+    const a = t - METEOR;
+    if (!(a >= 0 && a < 1.3)) return;
+    const x0 = 0.62 * this.w, y0 = 0.04 * this.h, x1 = 0.36 * this.w, y1 = 0.30 * this.h, q = a / 1.3;
+    const hx = x0 + (x1 - x0) * q, hy = y0 + (y1 - y0) * q, dx = x1 - x0, dy = (y1 - y0) * ASPECT;
+    const ln = Math.hypot(dx, dy), ux = dx / ln, uy = dy / ln / ASPECT;
+    const c = dirChar(Math.atan2(dy, dx) * 180 / Math.PI), fade = 1 - q * q;
+    for (let j = 1; j < 12; j++) {
+      const k = (1 - j / 12) * fade;
+      F.put(hy - uy * j, hx - ux * j, c, [0.75 * k, 0.85 * k, k]);
+    }
+    F.put(hy, hx, "*", [fade, fade, fade]);
+  }
+
+  drawArches(F, t, p) {   // arches lit in flowing colours, and their reflection under the deck
+    if (p <= 0) return;
+    const flip = { "/": "\\", "\\": "/", "_": "-" };
+    for (const [y, x, c, s] of this.arch) {
+      const pos = s >= 0 ? s : -1 - s;
+      if (pos > p * 1.02) continue;
+      const rgb = s < 0 ? [0.30, 0.32, 0.40] : hsv(pos * 1.5 - t * 0.25, 0.6, 1);
+      F.put(y, x, c, rgb);
+      const ry = 2 * this.deckY - y;
+      if (ry < this.h && s >= 0 && hash01(x * 7 + ry, Math.floor(t * 4)) > 0.25) F.put(ry, x, flip[c] || c, scale(rgb, 0.38));
+    }
+  }
+
+  drawDeck(F, t, p) {
+    if (p <= 0) return;
+    const n = Math.min(this.w, Math.floor(p * this.w * 1.02) + 1);
+    for (let x = 0; x < n; x++) {
+      const lamp = x % 6 === 0, k = lamp ? 0.85 + 0.15 * Math.sin(t * 2 + x * 0.4) : 0.55;
+      F.put(this.deckY, x, lamp ? "*" : "=", scale(C.DECK, k));
+    }
+  }
+
+  drawRiver(F, t, p) {   // waves on the Dahan River plus the reflection of everything above
+    if (p <= 0) return;
+    const { h: H, w: W, hz } = this, span = Math.max(H - hz - 1, 1);
+    for (let y = hz; y < H; y++) {
+      const d = (y - hz) / span, edge = p * (W + 6) + 2 * Math.sin(y * 1.7);
+      const my = Math.min(Math.max(2 * hz - 1 - y, 0), hz - 1);
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if (!(x < edge)) { F.ch[i] = 32; continue; }
+        const wave = Math.sin(x * 0.42 + y * 1.7 - t * 2) + 0.6 * Math.sin(x * 0.17 - y * 0.9 + t * 1.3);
+        const mx = Math.min(Math.max(x + Math.round(Math.sin(y * 1.3 + t * 2.4 + x * 0.05) * (0.5 + 1.6 * d)), 0), W - 1);
+        const j = my * W + mx, sr = F.rgb[3 * j], sg = F.rgb[3 * j + 1], sb = F.rgb[3 * j + 2];
+        const b = Math.max(sr, sg, sb);
+        if (b > 0.32 && wave + 0.7 * Math.sin(x * 1.1 + t * 3) > -0.9) {
+          const k = 0.75 - 0.4 * d;
+          F.ch[i] = (b > 0.75 ? "|" : b > 0.5 ? "!" : ":").charCodeAt(0);
+          F.rgb[3 * i] = sr * k; F.rgb[3 * i + 1] = sg * k; F.rgb[3 * i + 2] = sb * k;
+        } else {
+          const k = (0.55 + 0.3 * wave) * (1 - 0.45 * d);
+          F.ch[i] = (wave > 1 ? "~" : wave > 0.25 ? "-" : wave > -0.5 ? "." : " ").charCodeAt(0);
+          F.rgb[3 * i] = WATER[0] * k; F.rgb[3 * i + 1] = WATER[1] * k; F.rgb[3 * i + 2] = WATER[2] * k;
+        }
+      }
+    }
+  }
+
+  drawSnow(F, t) {
+    if (t < SHOW) return;
+    const s = t - SHOW, ramp = clamp01(s / 2.5);
+    this.snow.forEach(([h1, h2, h3, h4, h5], i) => {
+      if (h4 >= ramp) return;
+      const speed = 1.5 + 2.5 * h2;
+      const y = ((((speed * s - h3 * (this.h + 4)) % (this.h + 4)) + (this.h + 4)) % (this.h + 4)) - 2;
+      const x = h1 * this.w + 1.2 * Math.sin(t * 0.7 + i * 1.3);
+      if (y < this.deckY) F.put(y, x, h2 > 0.7 ? "*" : h2 > 0.35 ? "'" : ".", scale(C.SNOW, 0.55 + 0.45 * h5));
+    });
+  }
+
+  drawGreeting(F, t, p) {
+    if (p <= 0) return;
+    const msg = "MERRY CHRISTMAS", n = Math.floor(msg.length * clamp01(p * 4));
+    const y = Math.max(2, Math.round(0.06 * this.h)), x = Math.floor((this.w - msg.length) / 2);
+    for (let r = y; r < Math.min(this.h, y + 3); r++)
+      for (let c = Math.max(0, x - 1); c < Math.min(this.w, x + msg.length + 1); c++) F.ch[r * this.w + c] = 32;
+    const pal = [[1, 0.35, 0.35], [0.45, 1, 0.55], [1, 0.82, 0.35]];
+    for (let i = 0; i < n; i++)
+      F.put(y, x + i, msg[i], scale(pal[(i + Math.floor(t * 2)) % 3], 0.8 + 0.2 * Math.sin(t * 5 + i * 0.7)));
+    if (n < msg.length && ((t * 3) % 1) < 0.6) F.put(y, x + n, "_", [1, 0.82, 0.35]);
+    if (p * 4 > 1.3) { const sub = `BANQIAO ${this.year}`; F.text(y + 1, Math.floor((this.w - sub.length) / 2), sub, [0.75, 0.80, 0.92]); }
+  }
+
+  drawHud(F, t) {
+    let name = "fade";
+    if (t < FADE) { let best = STAGES[0]; for (const s of STAGES) if (s[1] <= t) best = s; name = best[0]; }
+    const pct = name === "fade" ? 100 : Math.floor(100 * prog(name, t));
+    let n = 0;
+    for (let i = 0; i < F.ch.length; i++) if (F.ch[i] !== 32) n++;
+    const lines = [`banqiao.py  stage ${name.padEnd(11)} ${String(pct).padStart(3)}%`,
+      `chars ${n.toLocaleString("en-US").padStart(6)}   t ${t.toFixed(2).padStart(5)}s`];
+    lines.forEach((s, r) => {
+      for (let x = 0; x < Math.min(F.w, s.length + 2); x++) F.ch[r * F.w + x] = 32;
+      F.text(r, 1, s, C.HUD);
+    });
+  }
+}
+
+// ------------------------------------------------------------------ drawing
+const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace';
+const CHARS = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
+const main = document.getElementById("main"), glow = document.getElementById("glow");
+const ctx = main.getContext("2d"), gctx = glow.getContext("2d");
+let scene, cw, cols, rows, ox, oy, vw, vh, dpr, glowImg, bg;
+
+function layout() {
+  vw = innerWidth; vh = innerHeight;
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  cw = Math.min(vw / 60, vh / 52, 12);            // at least 60 columns and 26 rows
+  cols = Math.floor(vw / cw); rows = Math.floor(vh / (2 * cw));
+  ox = (vw - cols * cw) / 2; oy = (vh - rows * 2 * cw) / 2;
+  main.width = Math.round(vw * dpr); main.height = Math.round(vh * dpr);
+  main.style.width = vw + "px"; main.style.height = vh + "px";
+  glow.width = cols; glow.height = rows;
+  Object.assign(glow.style, { left: ox + "px", top: oy + "px", width: cols * cw + "px", height: rows * 2 * cw + "px" });
+  glow.style.setProperty("--blur", (cw * 1.2).toFixed(1) + "px");
+  glowImg = gctx.createImageData(cols, rows);
+  scene = new Scene(cols, rows);
+  const hzY = oy + scene.hz * 2 * cw;
+  bg = ctx.createLinearGradient(0, 0, 0, vh);
+  bg.addColorStop(0, "#03040b");
+  bg.addColorStop(Math.min(0.999, hzY / vh), "#0e0a16");
+  bg.addColorStop(Math.min(1, hzY / vh + 0.001), "#03050a");
+  bg.addColorStop(1, "#020306");
+}
+
+function draw(F) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#03040b";
+  ctx.fillRect(0, 0, vw, vh);
+  ctx.globalAlpha = scene.fade;
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, vw, vh);
+  ctx.globalAlpha = 1;
+  ctx.font = `${(cw / 0.6).toFixed(2)}px ${FONT}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const groups = new Map(), n = F.w * F.h, d = glowImg.data;
+  for (let i = 0; i < n; i++) {
+    const c = F.ch[i];
+    const r = F.rgb[3 * i], g = F.rgb[3 * i + 1], b = F.rgb[3 * i + 2];
+    const on = c !== 32;
+    d[4 * i] = on ? r * 115 : 0; d[4 * i + 1] = on ? g * 115 : 0; d[4 * i + 2] = on ? b * 115 : 0; d[4 * i + 3] = 255;
+    if (!on || r + g + b < 0.03) continue;
+    const key = ((Math.min(255, r * 255) & 0xF8) << 16) | ((Math.min(255, g * 255) & 0xF8) << 8) | (Math.min(255, b * 255) & 0xF8);
+    let list = groups.get(key);
+    if (!list) groups.set(key, list = []);
+    list.push(i);
+  }
+  for (const [key, list] of groups) {
+    ctx.fillStyle = `rgb(${key >> 16},${(key >> 8) & 255},${key & 255})`;
+    for (const i of list) {
+      const y = (i / F.w) | 0, x = i - y * F.w;
+      ctx.fillText(CHARS[F.ch[i]] || "?", ox + (x + 0.5) * cw, oy + (y + 0.5) * 2 * cw);
+    }
+  }
+  gctx.putImageData(glowImg, 0, 0);
+}
+
+// ------------------------------------------------------------------ clock, sound, input
+const audio = new Audio("music.m4a");
+audio.loop = true;
+audio.preload = "auto";
+const soundBtn = document.getElementById("sound");
+let clock = 0, last = performance.now(), lastDraw = 0, running = true, soundOn = false;
+
+function startAudio() {
+  audio.currentTime = clock % LOOP;
+  return audio.play();
+}
+soundBtn.addEventListener("click", e => {
+  e.stopPropagation();
+  if (soundOn) {
+    audio.pause(); soundOn = false; soundBtn.textContent = "♪ 開聲音";
+    return;
+  }
+  soundOn = true; soundBtn.textContent = "♪ 關聲音";
+  if (running) startAudio().catch(() => { soundOn = false; soundBtn.textContent = "♪ 開聲音"; });
+});
+document.getElementById("src").addEventListener("click", e => e.stopPropagation());
+addEventListener("click", () => {
+  running = !running;
+  document.body.classList.toggle("is-paused", !running);
+  if (!running) audio.pause();
+  else if (soundOn) startAudio().catch(() => {});
+});
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  if (running) {
+    if (soundOn && !audio.paused && audio.readyState >= 2) clock = audio.currentTime;
+    else clock += dt;
+  }
+  if (now - lastDraw >= 30) {   // about 30 frames a second is plenty for ASCII
+    lastDraw = now;
+    draw(scene.render(clock));
+  }
+  requestAnimationFrame(frame);
+}
+let resizeTimer;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(layout, 150); });
+layout();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
